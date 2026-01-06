@@ -16,10 +16,19 @@ set -e
 CONFIG_FILE="config_setup_nginx_proxy_server.conf"
 SWAPSIZE=""
 SWAPFILE=""
-NGINX_CONF="/etc/nginx/sites-available/db_proxy"
-NGINX_CONF_LINK="/etc/nginx/sites-enabled/db_proxy"
+# Nginx stream (TCP) config path for MySQL proxy
+# Using stream.d so we don't touch HTTP server files
+NGINX_STREAM_CONF=""
 MYSQL_SERVER=""
 MYSQL_PORT=""
+LISTEN_PORT=""
+UPSTREAM_NAME=""
+PROXY_CONFIG_FILE=""
+PROXY_CONNECT_TIMEOUT=""
+PROXY_TIMEOUT=""
+UPSTREAM_KEEPALIVE=""
+UPSTREAM_MAX_FAILS=""
+UPSTREAM_FAIL_TIMEOUT=""
 
 # Function to detect system swap file
 detect_swap_file() {
@@ -309,52 +318,123 @@ setup_nginx_proxy() {
         exit 1
     fi
 
-    echo "Configuring Nginx to proxy to $MYSQL_SERVER:$MYSQL_PORT..."
+    echo "Configuring Nginx TCP stream proxy to $MYSQL_SERVER:$MYSQL_PORT..."
 
-    # Create Nginx configuration for proxying MySQL traffic
-    sudo bash -c "cat > $NGINX_CONF" <<EOL
-upstream mysql_backend {
-    server $MYSQL_SERVER:$MYSQL_PORT max_fails=3 fail_timeout=30s;
+    # ============================================================
+    # STEP 1: Ensure stream block exists with stream.d includes
+    # ============================================================
+    if ! grep -q "^stream\s*{" /etc/nginx/nginx.conf; then
+        echo "  [STEP 1] Adding stream block to nginx.conf..."
+        sudo tee -a /etc/nginx/nginx.conf >/dev/null <<'CONF_APPEND'
+
+# ============================================================
+# STREAM CONFIGURATION - TCP PROXY
+# Managed by: setup_nginx_proxy_server.sh
+# Purpose: Include all TCP stream proxy configs (e.g., MySQL)
+# ============================================================
+stream {
+    include /etc/nginx/stream.d/*.conf;
+}
+# ============================================================
+CONF_APPEND
+    else
+        # Verify include line exists inside stream block
+        if ! awk '/^stream\s*{/{f=1} f && /}/ {exit} f && /include \/etc\/nginx\/stream.d\/\*\.conf;/{found=1} END{exit !found}' /etc/nginx/nginx.conf; then
+            echo "  [STEP 1] Adding include directive to existing stream block..."
+            sudo awk 'BEGIN{added=0} /^stream\s*{/{print; print "    include /etc/nginx/stream.d/*.conf;"; added=1; next} {print} END{if(!added) exit 1}' /etc/nginx/nginx.conf | sudo tee /etc/nginx/nginx.conf.tmp >/dev/null && sudo mv /etc/nginx/nginx.conf.tmp /etc/nginx/nginx.conf
+        fi
+    fi
+
+    # ============================================================
+    # STEP 2: Disable HTTP - comment out site/conf includes
+    # ============================================================
+    echo "  [STEP 2] Disabling HTTP virtual hosts..."
+    
+    # Comment out sites-enabled and conf.d includes in http block
+    # (Default site symlink remains in place but is not loaded)
+    if grep -q "include /etc/nginx/sites-enabled/\*;" /etc/nginx/nginx.conf; then
+        sudo sed -i \
+            -e 's~^\s*include /etc/nginx/sites-enabled/\*;~    # DISABLED: include /etc/nginx/sites-enabled/*;~' \
+            -e 's~^\s*include /etc/nginx/conf.d/\*\.conf;~    # DISABLED: include /etc/nginx/conf.d/*.conf;~' \
+            /etc/nginx/nginx.conf
+        echo "    HTTP includes disabled (commented out)"
+    fi
+    
+    # Note: Default HTTP site symlink left in place but disabled via commented includes above
+    if [[ -L "/etc/nginx/sites-enabled/default" ]]; then
+        echo "    Default site symlink exists but is inactive (HTTP disabled)"
+    fi
+
+    # ============================================================
+    # STEP 3: Create TCP stream proxy config for MySQL
+    # ============================================================
+    echo "  [STEP 3] Creating stream proxy config at $NGINX_STREAM_CONF..."
+    
+    # Ensure stream.d directory exists
+    sudo mkdir -p /etc/nginx/stream.d
+    
+    sudo tee "$NGINX_STREAM_CONF" >/dev/null <<EOL
+# ============================================================
+# Stream Proxy Configuration
+# Managed by: setup_nginx_proxy_server.sh
+# Backend: $MYSQL_SERVER:$MYSQL_PORT
+# Local Listen Port: $LISTEN_PORT
+# ============================================================
+
+upstream $UPSTREAM_NAME {
+    # Backend server
+    server $MYSQL_SERVER:$MYSQL_PORT max_fails=$UPSTREAM_MAX_FAILS fail_timeout=$UPSTREAM_FAIL_TIMEOUT;
+    
+    # Connection pooling: keep idle connections for reuse
+    # Reduces connection overhead and improves performance
+    keepalive $UPSTREAM_KEEPALIVE;
 }
 
 server {
-    listen 3306;
-    location / {
-        proxy_pass http://mysql_backend;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_connect_timeout 5s;
-        proxy_send_timeout 10s;
-        proxy_read_timeout 10s;
-    }
+    # Accept incoming connections on local port
+    listen $LISTEN_PORT;
+    
+    # Forward TCP stream to remote backend server
+    proxy_pass $UPSTREAM_NAME;
+    
+    # Connection establishment timeout
+    proxy_connect_timeout $PROXY_CONNECT_TIMEOUT;
+    
+    # Read/write timeout between client and upstream
+    # Set to 1h for long-running MySQL queries
+    proxy_timeout $PROXY_TIMEOUT;
 }
+# ============================================================
 EOL
 
-    # Enable the new Nginx configuration
-    echo "Enabling Nginx configuration..."
-    if [[ ! -L "$NGINX_CONF_LINK" ]]; then
-        sudo ln -s "$NGINX_CONF" "$NGINX_CONF_LINK"
-    fi
-
-    # Test Nginx configuration
-    echo "Testing Nginx configuration..."
+    # ============================================================
+    # STEP 4: Validate and restart Nginx
+    # ============================================================
+    echo "  [STEP 4] Validating Nginx configuration..."
     if ! sudo nginx -t; then
-        echo "ERROR: Nginx configuration test failed."
+        echo "ERROR: Nginx configuration validation failed."
         exit 1
     fi
-
-    # Restart Nginx
-    echo "Restarting Nginx..."
+    echo "    Configuration valid"
+    
+    echo "  [STEP 4] Restarting Nginx..."
     sudo systemctl restart nginx
-
-    # Verify Nginx is running
+    
+    # Verify Nginx started successfully
     if sudo systemctl is-active --quiet nginx; then
-        echo "✓ SUCCESS: Nginx proxy server setup complete!"
-        echo "Nginx is forwarding traffic from port 3306 to $MYSQL_SERVER:$MYSQL_PORT"
+        echo "✓ SUCCESS: Nginx stream proxy setup complete!"
+        echo ""
+        echo "  Proxy Configuration:"
+        echo "    Backend:      $MYSQL_SERVER:$MYSQL_PORT"
+        echo "    Local Port:   $LISTEN_PORT (TCP)"
+        echo "    Upstream:     $UPSTREAM_NAME"
+        echo "    Config File:  $NGINX_STREAM_CONF"
+        echo "    Timeouts:     connect=$PROXY_CONNECT_TIMEOUT, proxy=$PROXY_TIMEOUT"
+        echo "    Keepalive:    $UPSTREAM_KEEPALIVE idle connections"
+        echo "    Resilience:   max_fails=$UPSTREAM_MAX_FAILS, fail_timeout=$UPSTREAM_FAIL_TIMEOUT"
+        echo "    HTTP:         DISABLED (by design)"
     else
-        echo "ERROR: Nginx failed to start."
+        echo "ERROR: Nginx failed to start after configuration."
         exit 1
     fi
 }
@@ -389,7 +469,13 @@ read_config
 echo "✓ Configuration loaded successfully."
 echo "  MySQL Server: $MYSQL_SERVER"
 echo "  MySQL Port: $MYSQL_PORT"
+echo "  Listen Port: $LISTEN_PORT"
+echo "  Upstream Name: $UPSTREAM_NAME"
+echo "  Keepalive Connections: $UPSTREAM_KEEPALIVE"
 echo ""
+
+# Set full path to nginx stream config file
+NGINX_STREAM_CONF="/etc/nginx/stream.d/${PROXY_CONFIG_FILE}"
 
 # Step 4: Determine swap size
 echo "STEP 4: Determining swap size based on system memory..."
@@ -408,7 +494,7 @@ echo ""
 
 # Step 7: Setup Nginx proxy
 echo "STEP 7: Setting up Nginx proxy server..."
-# setup_nginx_proxy
+setup_nginx_proxy
 echo ""
 
 echo "===================================================="
