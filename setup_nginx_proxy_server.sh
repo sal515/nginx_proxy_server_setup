@@ -385,9 +385,8 @@ upstream $UPSTREAM_NAME {
     # Backend server
     server $MYSQL_SERVER:$MYSQL_PORT max_fails=$UPSTREAM_MAX_FAILS fail_timeout=$UPSTREAM_FAIL_TIMEOUT;
     
-    # Connection pooling: keep idle connections for reuse
-    # Reduces connection overhead and improves performance
-    keepalive $UPSTREAM_KEEPALIVE;
+    # NOTE: 'keepalive' directive is NOT supported in stream module
+    # Stream connections are handled differently than HTTP
 }
 
 server {
@@ -430,7 +429,6 @@ EOL
         echo "    Upstream:     $UPSTREAM_NAME"
         echo "    Config File:  $NGINX_STREAM_CONF"
         echo "    Timeouts:     connect=$PROXY_CONNECT_TIMEOUT, proxy=$PROXY_TIMEOUT"
-        echo "    Keepalive:    $UPSTREAM_KEEPALIVE idle connections"
         echo "    Resilience:   max_fails=$UPSTREAM_MAX_FAILS, fail_timeout=$UPSTREAM_FAIL_TIMEOUT"
         echo "    HTTP:         DISABLED (by design)"
     else
@@ -471,7 +469,6 @@ echo "  MySQL Server: $MYSQL_SERVER"
 echo "  MySQL Port: $MYSQL_PORT"
 echo "  Listen Port: $LISTEN_PORT"
 echo "  Upstream Name: $UPSTREAM_NAME"
-echo "  Keepalive Connections: $UPSTREAM_KEEPALIVE"
 echo ""
 
 # Set full path to nginx stream config file
