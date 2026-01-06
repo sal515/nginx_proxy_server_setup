@@ -111,12 +111,6 @@ determine_swap_size() {
         SWAPSIZE=$(awk -v gb="$mem_gb" 'BEGIN {printf "%.2fG", gb*1.5}')
         echo "RAM is 2GB or more. Setting swap size to 1.5x RAM: $SWAPSIZE"
     fi
-
-    # read -p "Proceed with swap size of $SWAPSIZE? (y/n): " confirm
-    # if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
-    #     echo "Swap size setup aborted by user."
-    #     exit 1
-    # fi
 }
 
 # Function to setup swap memory
