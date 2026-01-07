@@ -308,8 +308,8 @@ disable_unnecessary_services() {
     # Disable snap and related services (major resource consumers)
     echo "Disabling snap services..."
     sudo systemctl disable --now snapd.service || true
-    sudo systemctl disable --now snap.oracle-cloud-agent.oracle-cloud-agent.service || true
-    sudo systemctl disable --now snap.oracle-cloud-agent.oracle-cloud-agent-updater.service || true
+    # sudo systemctl disable --now snap.oracle-cloud-agent.oracle-cloud-agent.service || true
+    # sudo systemctl disable --now snap.oracle-cloud-agent.oracle-cloud-agent-updater.service || true
 
     # Disable unnecessary hardware-related services
     echo "Disabling unnecessary hardware services..."
