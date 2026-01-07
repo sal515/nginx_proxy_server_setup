@@ -227,6 +227,75 @@ disable_unattended_upgrades() {
 
 }
 
+# Function to allow MySQL port via iptables (OCI images prefer iptables)
+setup_iptables_mysql_port() {
+    echo "===================================================="
+    echo "Configuring iptables to allow configured TCP port..."
+    echo "===================================================="
+
+    if ! command -v iptables >/dev/null 2>&1; then
+        echo "ERROR: iptables is not available on this system."
+        exit 1
+    fi
+
+    # Determine desired port from config: prefer LISTEN_PORT, fallback to MYSQL_PORT
+    local port
+    if [[ -n "$LISTEN_PORT" ]]; then
+        port="$LISTEN_PORT"
+    elif [[ -n "$MYSQL_PORT" ]]; then
+        port="$MYSQL_PORT"
+        echo "NOTE: LISTEN_PORT not set; using MYSQL_PORT=$MYSQL_PORT"
+    else
+        echo "ERROR: No port configured. Set LISTEN_PORT (preferred) or MYSQL_PORT in $CONFIG_FILE."
+        exit 1
+    fi
+
+    # Validate port is numeric and within range
+    if ! [[ "$port" =~ ^[0-9]+$ ]] || (( port < 1 || port > 65535 )); then
+        echo "ERROR: Invalid port '$port'. Must be an integer between 1 and 65535."
+        exit 1
+    fi
+
+    # Add IPv4 rule only if not already present
+    if sudo iptables -C INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null; then
+        echo "IPv4 rule already present: ACCEPT tcp dport $port"
+    else
+        echo "Adding IPv4 rule: ACCEPT tcp dport $port on INPUT chain..."
+        sudo iptables -I INPUT -p tcp --dport "$port" -j ACCEPT
+    fi
+
+    # Add IPv6 rule if ip6tables exists
+    if command -v ip6tables >/dev/null 2>&1; then
+        if sudo ip6tables -C INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null; then
+            echo "IPv6 rule already present: ACCEPT tcp dport $port"
+        else
+            echo "Adding IPv6 rule: ACCEPT tcp dport $port on INPUT chain..."
+            sudo ip6tables -I INPUT -p tcp --dport "$port" -j ACCEPT
+        fi
+    fi
+
+    # Persist rules only if /etc/iptables/rules.v4 exists; otherwise warn and exit
+    echo "Preparing to persist iptables rules..."
+    if [[ -f /etc/iptables/rules.v4 ]]; then
+        echo "Updating /etc/iptables/rules.v4 with current rules..."
+        sudo iptables-save | sudo tee /etc/iptables/rules.v4 >/dev/null
+        # Optionally update IPv6 persistence if rules.v6 exists
+        if [[ -f /etc/iptables/rules.v6 ]] && command -v ip6tables >/dev/null 2>&1; then
+            echo "Updating /etc/iptables/rules.v6 with current IPv6 rules..."
+            sudo ip6tables-save | sudo tee /etc/iptables/rules.v6 >/dev/null
+        fi
+        echo "✓ Persistence updated."
+    else
+        echo "WARNING: /etc/iptables/rules.v4 not found. Persistence is not configured on this system."
+        echo "Please ensure iptables-persistent is installed and rules.v4 exists before running this setup."
+        read -p "Press ENTER to acknowledge this warning. The setup will now quit." _ack
+        exit 1
+    fi
+
+    echo "Verifying rule (IPv4)..."
+    sudo iptables -L INPUT -n -v | awk -v p="$port" '$0 ~ /tcp/ && $0 ~ (p "\\b") {print}' || true
+}
+
 # Function to disable unnecessary services to save resources on minimal systems
 disable_unnecessary_services() {
     echo "===================================================="
@@ -489,8 +558,13 @@ echo "STEP 6: Disabling unnecessary services..."
 disable_unnecessary_services
 echo ""
 
-# Step 7: Setup Nginx proxy
-echo "STEP 7: Setting up Nginx proxy server..."
+# Step 7: Configure iptables for MySQL (3306)
+echo "STEP 7: Configuring iptables to allow 3306/tcp..."
+setup_iptables_mysql_port
+echo ""
+
+# Step 8: Setup Nginx proxy
+echo "STEP 8: Setting up Nginx proxy server..."
 setup_nginx_proxy
 echo ""
 
@@ -501,10 +575,12 @@ echo ""
 echo "Summary:"
 echo "  - OS: Ubuntu (verified)"
 echo "  - Swap: Configured and active"
+echo "  - Firewall: iptables allows ${LISTEN_PORT:-$MYSQL_PORT}/tcp (others unchanged)"
 echo "  - Nginx: Running and configured"
 echo "  - Proxy: Forwarding to $MYSQL_SERVER:$MYSQL_PORT"
 echo ""
 echo "To verify the setup, run:"
 echo "  swapon --show  (to check swap)"
 echo "  sudo systemctl status nginx  (to check Nginx)"
+echo "  sudo iptables -L -n -v | grep ${LISTEN_PORT:-$MYSQL_PORT}  (to check firewall)"
 echo "===================================================="
