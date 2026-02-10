@@ -9,8 +9,9 @@ CONFIG_FILE="config_setup_nginx_proxy_server.conf"
 # Cloudflare tunnel configuration (loaded from config file)
 TUNNEL_NAME=""
 TUNNEL_HOSTNAME=""
-MYSQL_SERVER=""
+MYSQL_SERVER=""  # Used for reference/documentation only
 MYSQL_PORT=""
+LISTEN_PORT=""  # Port where nginx proxy is listening locally
 CREDENTIALS_DIR="/etc/cloudflared"
 TUNNEL_CONFIG_FILE="$CREDENTIALS_DIR/config.yml"
 
@@ -221,12 +222,11 @@ setup_tunnel_config() {
     echo "===================================================="
 
     # Validate required config variables
-    if [[ -z "$TUNNEL_NAME" ]] || [[ -z "$TUNNEL_HOSTNAME" ]] || [[ -z "$MYSQL_SERVER" ]] || [[ -z "$MYSQL_PORT" ]]; then
+    if [[ -z "$TUNNEL_NAME" ]] || [[ -z "$TUNNEL_HOSTNAME" ]] || [[ -z "$LISTEN_PORT" ]]; then
         echo -e "${RED}ERROR: Required config variables not set:${NC}"
         echo "  TUNNEL_NAME: $TUNNEL_NAME"
         echo "  TUNNEL_HOSTNAME: $TUNNEL_HOSTNAME"
-        echo "  MYSQL_SERVER: $MYSQL_SERVER"
-        echo "  MYSQL_PORT: $MYSQL_PORT"
+        echo "  LISTEN_PORT: $LISTEN_PORT (nginx proxy port)"
         exit 1
     fi
 
@@ -259,7 +259,8 @@ setup_tunnel_config() {
 # Cloudflare Tunnel Configuration
 # Managed by: setup_cloudflared_on_server.sh
 # Tunnel: $TUNNEL_NAME
-# Backend Service: $MYSQL_SERVER:$MYSQL_PORT
+# Local Service: 127.0.0.1:$LISTEN_PORT (nginx proxy)
+# Backend MySQL: $MYSQL_SERVER:$MYSQL_PORT (proxied by nginx)
 # Public Hostname: $TUNNEL_HOSTNAME
 # ============================================================
 
@@ -267,9 +268,9 @@ tunnel: $TUNNEL_NAME
 credentials-file: $TUNNEL_CREDENTIALS_FILE
 
 ingress:
-  # Route traffic from public hostname to MySQL server
+  # Route traffic from public hostname to local nginx proxy
   - hostname: $TUNNEL_HOSTNAME
-    service: tcp://$MYSQL_SERVER:$MYSQL_PORT
+    service: tcp://127.0.0.1:$LISTEN_PORT
   
   # Catch-all rule (required)
   - service: http_status:404
@@ -285,7 +286,8 @@ EOF
     echo "  Tunnel Name: $TUNNEL_NAME"
     echo "  Tunnel UUID: $TUNNEL_UUID"
     echo "  Public Hostname: $TUNNEL_HOSTNAME"
-    echo "  Backend MySQL Server: $MYSQL_SERVER:$MYSQL_PORT"
+    echo "  Local Service: 127.0.0.1:$LISTEN_PORT (nginx proxy)"
+    echo "  Backend MySQL: $MYSQL_SERVER:$MYSQL_PORT (via nginx)"
     echo "  Credentials: $TUNNEL_CREDENTIALS_FILE"
     
     mark_checkpoint "TUNNEL_CONFIG"
@@ -354,6 +356,42 @@ install_tunnel_service() {
     mark_checkpoint "TUNNEL_SERVICE"
 }
 
+# Function to configure DNS route for tunnel
+configure_tunnel_dns() {
+    if check_checkpoint "TUNNEL_DNS"; then
+        return 0
+    fi
+
+    echo "===================================================="
+    echo "Configuring DNS route for tunnel..."
+    echo "===================================================="
+
+    if [[ -z "$TUNNEL_NAME" ]] || [[ -z "$TUNNEL_HOSTNAME" ]]; then
+        echo -e "${RED}ERROR: TUNNEL_NAME or TUNNEL_HOSTNAME not set${NC}"
+        exit 1
+    fi
+
+    echo "Creating DNS CNAME record: $TUNNEL_HOSTNAME → $TUNNEL_NAME.cfargotunnel.com"
+    
+    # Create DNS route for the tunnel
+    if cloudflared tunnel route dns "$TUNNEL_NAME" "$TUNNEL_HOSTNAME" 2>/dev/null; then
+        echo "✓ DNS route configured successfully"
+    else
+        echo -e "${YELLOW}⚠ DNS route may already exist or encountered an error${NC}"
+        echo "  You can manually create it in Cloudflare Dashboard:"
+        echo "  Networks → Tunnels → $TUNNEL_NAME → Public Hostname"
+    fi
+
+    echo ""
+    echo "DNS Configuration:"
+    echo "  Hostname: $TUNNEL_HOSTNAME"
+    echo "  Target: $TUNNEL_NAME.cfargotunnel.com"
+    echo ""
+    echo -e "${YELLOW}Note: DNS propagation may take 1-2 minutes${NC}"
+    
+    mark_checkpoint "TUNNEL_DNS"
+}
+
 # Function to show checkpoint status
 show_checkpoint_status() {
     echo "===================================================="
@@ -384,8 +422,9 @@ main() {
     echo -e "${YELLOW}IMPORTANT: Ensure config file '$CONFIG_FILE' is updated with:${NC}"
     echo "  - TUNNEL_NAME (e.g., precisiontime-db)"
     echo "  - TUNNEL_HOSTNAME (e.g., proxy.precisiontime.ca)"
-    echo "  - MYSQL_SERVER (e.g., 10.0.1.55)"
-    echo "  - MYSQL_PORT (e.g., 3306)"
+    echo "  - LISTEN_PORT (e.g., 3306 - nginx proxy port)"
+    echo "  - MYSQL_SERVER (e.g., 10.0.1.55 - for nginx config)"
+    echo "  - MYSQL_PORT (e.g., 3306 - backend MySQL port)"
     echo ""
     read -p "Press ENTER to continue or Ctrl+C to abort..."
     echo ""
@@ -403,6 +442,14 @@ main() {
     read -p "Install tunnel as systemd service for automatic startup? (y/n): " install_service
     if [[ "$install_service" =~ ^[Yy]$ ]]; then
         install_tunnel_service
+        
+        echo ""
+        read -p "Configure DNS route in Cloudflare automatically? (y/n): " configure_dns
+        if [[ "$configure_dns" =~ ^[Yy]$ ]]; then
+            configure_tunnel_dns
+        else
+            echo -e "${YELLOW}⚠ Skipping DNS configuration. You must configure it manually in Cloudflare Dashboard.${NC}"
+        fi
     fi
 
     echo ""
@@ -413,14 +460,16 @@ main() {
     echo "Summary:"
     echo "  - Tunnel Name: $TUNNEL_NAME"
     echo "  - Public Hostname: $TUNNEL_HOSTNAME"
-    echo "  - Backend MySQL Server: $MYSQL_SERVER:$MYSQL_PORT"
+    echo "  - Local Service: 127.0.0.1:$LISTEN_PORT (nginx proxy)"
+    echo "  - Backend MySQL: $MYSQL_SERVER:$MYSQL_PORT (via nginx)"
     echo "  - Config File: $TUNNEL_CONFIG_FILE"
     echo "  - Checkpoint File: $CHECKPOINT_FILE"
     echo ""
     echo "Next steps:"
-    echo "  1. Configure DNS: Point $TUNNEL_HOSTNAME to tunnel (via Cloudflare dashboard)"
+    echo "  1. Wait 1-2 minutes for DNS propagation"
     echo "  2. Test connection: mysql -h $TUNNEL_HOSTNAME -P 3306 -u user -p"
     echo "  3. Monitor service: sudo systemctl status cloudflared"
+    echo "  4. Check logs: sudo journalctl -u cloudflared -f"
     echo ""
     echo "To view checkpoint status: cat $CHECKPOINT_FILE"
     echo "To reset checkpoints: sudo rm $CHECKPOINT_FILE"
