@@ -11,7 +11,7 @@ TUNNEL_NAME=""
 TUNNEL_HOSTNAME=""
 MYSQL_SERVER=""
 MYSQL_PORT=""
-CREDENTIALS_DIR="./cloudflared"
+CREDENTIALS_DIR="/etc/cloudflared"
 TUNNEL_CONFIG_FILE="$CREDENTIALS_DIR/config.yml"
 
 # Color codes for output
@@ -119,9 +119,9 @@ install_cloudflared() {
     # Add repository to apt sources
     echo 'deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared jammy main' | sudo tee /etc/apt/sources.list.d/cloudflared.list
 
-    # Update and install
+    # Update and install (without upgrading existing packages)
     sudo apt-get update
-    sudo apt-get install -y cloudflared
+    sudo apt-get install -y --no-upgrade cloudflared
 
     # Verify installation
     if ! command -v cloudflared >/dev/null 2>&1; then
@@ -311,7 +311,7 @@ test_tunnel() {
     echo "Monitor the output for any errors..."
     echo ""
     
-    cloudflared tunnel run "$TUNNEL_NAME" || true
+    sudo cloudflared tunnel --config "$TUNNEL_CONFIG_FILE" run "$TUNNEL_NAME" || true
 
     echo ""
     read -p "Did the tunnel start successfully? (y/n): " response
@@ -333,8 +333,8 @@ install_tunnel_service() {
     echo "Installing tunnel as systemd service..."
     echo "===================================================="
 
-    # Install service
-    sudo cloudflared service install
+    # Install service with explicit config file path
+    sudo cloudflared --config "$TUNNEL_CONFIG_FILE" service install
 
     # Enable and start service
     sudo systemctl enable cloudflared
